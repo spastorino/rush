@@ -2,14 +2,12 @@ mod cmd;
 
 use std::convert::TryFrom;
 use std::io::{self, Write};
-use std::process::Command;
 
-use self::cmd::{Cmd, ParseError};
+use self::cmd::{Expression, Error};
 
 fn main() -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
 
     loop {
         stdout.write(b"> ")?;
@@ -17,19 +15,14 @@ fn main() -> io::Result<()> {
 
         let mut input = String::new();
         stdin.read_line(&mut input)?;
-        match Cmd::try_from(input.as_ref()) {
-            Ok(cmd) => {
-                match Command::new(cmd.binary).args(cmd.args).spawn() {
-                    Ok(mut child) => {
-                        child.wait()?;
-                    }
-                    Err(_) => {
-                        stderr.write(b"Command not found\n")?;
-                    }
-                }
+        match Expression::try_from(input.as_ref()) {
+            Ok(expr) => {
+                expr.run().unwrap();
             }
 
-            Err(ParseError::EmptyLine) => {}
+            Err(Error::EmptyLine) => {}
+
+            _ => {}
         }
     }
 }
