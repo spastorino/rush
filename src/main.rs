@@ -3,9 +3,9 @@ mod cmd;
 use std::convert::TryFrom;
 use std::io::{self, Write};
 
-use self::cmd::{Expression, Error};
+use self::cmd::{Error, Expression};
 
-fn main() -> io::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -17,11 +17,9 @@ fn main() -> io::Result<()> {
         stdin.read_line(&mut input)?;
         match Expression::try_from(input.as_ref()) {
             Ok(expr) => {
-                expr.run().unwrap();
+                let _ = expr.run();
             }
-
             Err(Error::EmptyLine) => {}
-
             _ => {}
         }
     }

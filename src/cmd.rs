@@ -6,6 +6,10 @@ use std::process::Command;
 use std::str::SplitWhitespace;
 use std::vec::IntoIter;
 
+const DOUBLE_AMPERSAND: &'static str = "&&";
+const SEMICOLON: &'static str = ";";
+
+#[derive(Debug)]
 pub enum Expression<'a> {
     Cmd(Cmd<'a>),
     Compound(Box<Compound<'a>>),
@@ -17,23 +21,49 @@ pub struct Cmd<'a> {
     pub args: LineIter<'a>,
 }
 
+#[derive(Debug)]
 pub struct Compound<'a> {
     pub op: Op,
     pub left: Expression<'a>,
     pub right: Expression<'a>,
 }
 
+#[derive(Debug, PartialEq)]
 pub enum Op {
     Semicolon,
+    DoubleAmpersand,
 }
 
 #[derive(Debug)]
 pub struct LineIter<'a>(SplitWhitespace<'a>);
 
+// TODO: implement std::error::Error for Error
 #[derive(Debug)]
 pub enum Error {
     EmptyLine,
     Io(io::Error),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Error::Io(e) => write!(f, "{}", e),
+            Error::EmptyLine => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
+        match self {
+            Error::EmptyLine => None,
+            Error::Io(e) => Some(e),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
 }
 
 impl<'a> TryFrom<&'a str> for Expression<'a> {
@@ -43,11 +73,15 @@ impl<'a> TryFrom<&'a str> for Expression<'a> {
     fn try_from(line: &'a str) -> Result<Self, Self::Error> {
         let mut cmds = vec![];
 
-        for cmd in line.split(';') {
+        if line.contains(DOUBLE_AMPERSAND) {
+            return Expression::build_double_ampersand_expression(line);
+        }
+
+        for cmd in line.split(SEMICOLON) {
             cmds.push(Cmd::try_from(cmd)?);
         }
 
-        Ok(Expression::build_semicolon_expression(cmds.into_iter()))
+        Expression::build_semicolon_expression(cmds.into_iter())
     }
 }
 
@@ -61,34 +95,60 @@ impl<'a> Expression<'a> {
                     compound.left.run()?;
                     compound.right.run()
                 }
+
+                Op::DoubleAmpersand => {
+                    let left = compound.left;
+                    let right = compound.right;
+                    left.run().and_then(|_| right.run())
+                }
             },
         }
     }
 
-    fn build_semicolon_expression(mut cmds: IntoIter<Cmd<'a>>) -> Expression<'a> {
+    fn build_double_ampersand_expression(line: &'a str) -> Result<Expression<'a>, Error> {
+        let idx = line.find(DOUBLE_AMPERSAND);
+        assert!(idx.is_some()); // we only enter this block if the line contains a double ampersand
+        let (head, tail) = line.split_at(idx.unwrap());
+        let (_, tail) = tail.split_at(3);
+
+        Ok(Expression::Compound(Box::new(Compound {
+            op: Op::DoubleAmpersand,
+            left: Expression::try_from(head)?,
+            right: Expression::try_from(tail)?,
+        })))
+    }
+
+    fn build_semicolon_expression(mut cmds: IntoIter<Cmd<'a>>) -> Result<Expression<'a>, Error> {
         assert!(cmds.len() >= 1);
         let cmd_left = cmds.next().unwrap();
 
-        if cmds.len() == 0 {
+        let expression = if cmds.len() == 0 {
             Expression::Cmd(cmd_left)
         } else {
             Expression::Compound(Box::new(Compound {
                 op: Op::Semicolon,
                 left: Expression::Cmd(cmd_left),
-                right: Expression::build_semicolon_expression(cmds),
+                right: Expression::build_semicolon_expression(cmds)?,
             }))
-        }
+        };
+
+        Ok(expression)
     }
 }
 
 impl<'a> Cmd<'a> {
     pub fn run(self) -> Result<bool, Error> {
         match Command::new(&self.binary).args(self.args).spawn() {
-            Ok(mut child) => {
-                child.wait().map(|exit_status| exit_status.success()).map_err(|e| Error::Io(e))
-            }
-            Err(_) => {
-                io::stderr().write(b"Command not found\n").map(|_| true).map_err(|e| Error::Io(e))
+            Ok(mut child) => child
+                .wait()
+                .map(|exit_status| exit_status.success())
+                .map_err(|e| Error::Io(e)),
+            Err(e) => {
+                io::stderr()
+                    .write_fmt(format_args!("{:?}: command not found\n", self.binary))
+                    .map(|_| true)
+                    .map_err(|e| Error::Io(e))?;
+                Err(Error::Io(e))
             }
         }
     }
@@ -151,33 +211,70 @@ mod test {
     #[test]
     fn test_semicolon_expression() {
         match Expression::try_from("echo 1 2 3; ls").unwrap() {
-            Expression::Compound(compound) => {
-                match *compound {
-                    Compound {
-                        op: Op::Semicolon,
-                        left: Expression::Cmd(Cmd {
+            Expression::Compound(compound) => match *compound {
+                Compound {
+                    op,
+                    left:
+                        Expression::Cmd(Cmd {
                             binary: binary_left,
                             args: mut args_left,
                         }),
 
-                        right: Expression::Cmd(Cmd {
+                    right:
+                        Expression::Cmd(Cmd {
                             binary: binary_right,
                             args: mut args_right,
                         }),
-                    } => {
-                        assert_eq!(binary_left, OsStr::new("echo"));
-                        assert_eq!(args_left.next(), Some("1"));
-                        assert_eq!(args_left.next(), Some("2"));
-                        assert_eq!(args_left.next(), Some("3"));
-                        assert_eq!(args_left.next(), None);
+                } => {
+                    assert_eq!(op, Op::DoubleAmpersand);
+                    assert_eq!(binary_left, OsStr::new("echo"));
+                    assert_eq!(args_left.next(), Some("1"));
+                    assert_eq!(args_left.next(), Some("2"));
+                    assert_eq!(args_left.next(), Some("3"));
+                    assert_eq!(args_left.next(), None);
 
-                        assert_eq!(binary_right, OsStr::new("ls"));
-                        assert_eq!(args_right.next(), None);
-                    }
-
-                    _ => assert!(false),
+                    assert_eq!(binary_right, OsStr::new("ls"));
+                    assert_eq!(args_right.next(), None);
                 }
-            }
+
+                _ => assert!(false),
+            },
+
+            _ => assert!(false),
+        }
+    }
+
+    #[test]
+    fn test_double_ampersand_expression() {
+        match Expression::try_from("echo 1 2 3 && ls").unwrap() {
+            Expression::Compound(compound) => match *compound {
+                Compound {
+                    op,
+                    left:
+                        Expression::Cmd(Cmd {
+                            binary: binary_left,
+                            args: mut args_left,
+                        }),
+
+                    right:
+                        Expression::Cmd(Cmd {
+                            binary: binary_right,
+                            args: mut args_right,
+                        }),
+                } => {
+                    assert_eq!(op, Op::DoubleAmpersand);
+                    assert_eq!(binary_left, OsStr::new("echo"));
+                    assert_eq!(args_left.next(), Some("1"));
+                    assert_eq!(args_left.next(), Some("2"));
+                    assert_eq!(args_left.next(), Some("3"));
+                    assert_eq!(args_left.next(), None);
+
+                    assert_eq!(binary_right, OsStr::new("ls"));
+                    assert_eq!(args_right.next(), None);
+                }
+
+                _ => assert!(false),
+            },
 
             _ => assert!(false),
         }
