@@ -81,7 +81,7 @@ impl<'a> Expression<'a> {
         let idx = line.find(DOUBLE_AMPERSAND);
         assert!(idx.is_some()); // we only enter this block if the line contains a double ampersand
         let (head, tail) = line.split_at(idx.unwrap());
-        let (_, tail) = tail.split_at(3);
+        let tail = tail.trim_start_matches("&&").trim_start_matches(" ");
 
         Ok(Expression::Compound(Box::new(Compound {
             op: Op::DoubleAmpersand,
