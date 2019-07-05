@@ -1,7 +1,9 @@
 use std::convert::TryFrom;
+use std::env;
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::iter::Iterator;
+use std::path::Path;
 use std::process::{self, Command};
 use std::str::SplitWhitespace;
 use std::vec::IntoIter;
@@ -16,7 +18,7 @@ pub enum Cmd<'a> {
     // An invokable command consists of a binary and its arguments
     Invoke(Invoke<'a>),
 
-    Builtin(Builtin),
+    Builtin(Builtin<'a>),
 }
 
 #[derive(Debug)]
@@ -26,8 +28,9 @@ pub struct Invoke<'a> {
 }
 
 #[derive(Debug)]
-pub enum Builtin {
+pub enum Builtin<'a> {
     Exit(i32),
+    Cd(&'a Path),
 }
 
 pub struct Compound<'a> {
@@ -49,6 +52,7 @@ pub enum Error {
     EmptyLine,
     Io(io::Error),
     NoCmd,
+    NoDir,
 }
 
 impl<'a> TryFrom<&'a str> for Expression<'a> {
@@ -125,6 +129,14 @@ impl<'a> Cmd<'a> {
                 process::exit(status);
             }
 
+            Cmd::Builtin(Builtin::Cd(path)) => match path.canonicalize() {
+                Ok(path) => env::set_current_dir(&path)
+                    .map(|_| true)
+                    .map_err(|e| Error::Io(e)),
+
+                Err(e) => Err(Error::Io(e)),
+            },
+
             Cmd::Invoke(Invoke { binary, args }) => match Command::new(binary).args(args).spawn() {
                 Ok(mut child) => child
                     .wait()
@@ -149,6 +161,11 @@ impl<'a> TryFrom<&'a str> for Cmd<'a> {
 
         match binary.to_str() {
             Some("exit") => Ok(Cmd::Builtin(Builtin::Exit(0))),
+
+            Some("cd") => {
+                let path = args.next().map(OsStr::new).ok_or(Error::NoDir)?;
+                Ok(Cmd::Builtin(Builtin::Cd(Path::new(path))))
+            }
 
             Some(_) => Ok(Cmd::Invoke(Invoke { binary, args })),
 
@@ -213,6 +230,17 @@ mod test {
 
         if let Cmd::Builtin(Builtin::Exit(status)) = cmd {
             assert_eq!(status, 0);
+        } else {
+            assert!(false);
+        }
+    }
+
+    #[test]
+    fn test_cd_builtin() {
+        let cmd = Cmd::try_from("cd /home").unwrap();
+
+        if let Cmd::Builtin(Builtin::Cd(path)) = cmd {
+            assert_eq!(path.to_str(), Some("/home"));
         } else {
             assert!(false);
         }
